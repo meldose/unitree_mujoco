@@ -48,6 +48,22 @@ def _parse_args():
     p.add_argument("--gait-lat-amp", type=float, default=0.08, help="Hip roll swing amplitude during gait (rad).")
     p.add_argument("--gait-lat-offset", type=float, default=0.05, help="Baseline hip roll offset to widen stance (rad).")
     p.add_argument("--gait-lat-comp", type=float, default=0.3, help="Lateral velocity compensation during gait.")
+    p.add_argument("--gait-vel-kp", type=float, default=0.6, help="Forward velocity damping gain.")
+    p.add_argument("--gait-vel-kd", type=float, default=0.2, help="Forward velocity rate damping gain.")
+    p.add_argument("--gait-lat-kd", type=float, default=0.3, help="Lateral velocity damping gain.")
+    p.add_argument("--back-pitch-thresh", type=float, default=0.08, help="Backward lean threshold (rad).")
+    p.add_argument("--back-pitch-kp", type=float, default=1.2, help="Extra forward pitch gain when leaning back.")
+    p.add_argument("--back-pitch-ff", type=float, default=0.18, help="Direct forward-lean bias when leaning back (rad).")
+    p.add_argument("--side-roll-thresh", type=float, default=0.06, help="Side lean threshold (rad).")
+    p.add_argument("--side-roll-ff", type=float, default=0.18, help="Direct roll bias when leaning sideways (rad).")
+    p.add_argument("--gait-com-forward", type=float, default=0.03, help="Desired pelvis-forward offset over mid-foot (m).")
+    p.add_argument("--gait-start-ramp", type=float, default=2.5, help="Seconds to ramp gait bias/lean.")
+    p.add_argument("--gait-shuffle", action="store_true", default=False, help="Ultra-stable shuffle gait.")
+    p.add_argument("--shuffle-step-freq", type=float, default=0.5, help="Shuffle step frequency (Hz).")
+    p.add_argument("--shuffle-swing-scale", type=float, default=0.45, help="Shuffle swing scale.")
+    p.add_argument("--shuffle-ds", type=float, default=0.32, help="Shuffle double-support fraction.")
+    p.add_argument("--shuffle-hip-offset", type=float, default=0.32, help="Shuffle forward lean (rad).")
+    p.add_argument("--shuffle-pitch-bias", type=float, default=0.30, help="Shuffle forward pitch bias (rad).")
     p.add_argument("--headless", action="store_true")
     p.add_argument("--print-keys", action="store_true")
     p.add_argument("--keyframe-id", type=int, default=None)
@@ -198,14 +214,25 @@ def main() -> int:
         args.hip_amp = min(args.hip_amp, 0.25)
         args.knee_amp = min(args.knee_amp, 0.35)
         args.ankle_amp = min(args.ankle_amp, 0.2)
-        args.hip_offset = min(args.hip_offset, 0.15)
+        # Allow stronger forward lean for stability; cap to avoid extreme.
+        args.hip_offset = _clamp(args.hip_offset, 0.10, 0.35)
         args.swing_knee = min(args.swing_knee, 0.25)
         args.swing_ankle = min(args.swing_ankle, 0.1)
-        args.gait_pitch_bias = min(args.gait_pitch_bias, 0.15)
+        args.gait_pitch_bias = _clamp(args.gait_pitch_bias, 0.10, 0.35)
         args.gait_stab_scale = max(args.gait_stab_scale, 1.0)
         args.gait_lat_amp = min(args.gait_lat_amp, 0.08)
         args.gait_lat_offset = min(args.gait_lat_offset, 0.05)
         args.gait_lat_comp = min(args.gait_lat_comp, 0.3)
+        args.gait_vel_kp = min(args.gait_vel_kp, 0.8)
+        args.gait_vel_kd = min(args.gait_vel_kd, 0.4)
+        args.gait_lat_kd = min(args.gait_lat_kd, 0.5)
+        args.back_pitch_thresh = _clamp(args.back_pitch_thresh, 0.04, 0.15)
+        args.back_pitch_kp = _clamp(args.back_pitch_kp, 0.6, 2.0)
+        args.back_pitch_ff = _clamp(args.back_pitch_ff, 0.05, 0.35)
+        args.side_roll_thresh = _clamp(args.side_roll_thresh, 0.03, 0.12)
+        args.side_roll_ff = _clamp(args.side_roll_ff, 0.05, 0.35)
+        args.gait_com_forward = _clamp(args.gait_com_forward, 0.0, 0.08)
+        args.gait_start_ramp = max(args.gait_start_ramp, 1.0)
         args.gait_ds = _clamp(args.gait_ds, 0.1, 0.25)
         args.gait_swing_scale = _clamp(args.gait_swing_scale, 0.7, 1.0)
         args.gait_stance_knee = _clamp(args.gait_stance_knee, 0.03, 0.08)
@@ -348,11 +375,34 @@ def main() -> int:
             # PD hold on joints
             data.ctrl[:] = 0.0
             qpos_cmd = qpos_des.copy()
+            gait_ramp = 1.0
+            gait_pitch_bias_eff = args.gait_pitch_bias
+            gait_com_forward_eff = args.gait_com_forward
+            gait_swing_scale_eff = args.gait_swing_scale
+            gait_ds_eff = args.gait_ds
+            gait_stance_knee_eff = args.gait_stance_knee
+            gait_stance_ankle_eff = args.gait_stance_ankle
+            hip_offset_eff = args.hip_offset
+            step_freq_eff = args.step_freq
 
             if args.gait_walk:
                 # Simple open-loop gait: sinusoidal hip/knee/ankle pitch.
+                if args.gait_start_ramp > 0.0:
+                    gait_ramp = _clamp((time.time() - pin_until) / args.gait_start_ramp, 0.0, 1.0)
+                else:
+                    gait_ramp = 1.0
+                if args.gait_shuffle:
+                    step_freq_eff = min(step_freq_eff, args.shuffle_step_freq)
+                    gait_swing_scale_eff = min(gait_swing_scale_eff, args.shuffle_swing_scale)
+                    gait_ds_eff = max(gait_ds_eff, args.shuffle_ds)
+                    hip_offset_eff = max(hip_offset_eff, args.shuffle_hip_offset)
+                    gait_pitch_bias_eff = max(gait_pitch_bias_eff, args.shuffle_pitch_bias)
+                    gait_com_forward_eff = max(gait_com_forward_eff, 0.05)
+                    gait_stance_knee_eff = max(gait_stance_knee_eff, 0.08)
+                    gait_stance_ankle_eff = max(gait_stance_ankle_eff, 0.06)
+
                 t = time.time() - pin_until
-                phase = 2.0 * np.pi * args.step_freq * t
+                phase = 2.0 * np.pi * step_freq_eff * t
                 s = np.sin(phase)
                 # Soften extremes to reduce foot slap and pitching.
                 s = np.tanh(args.gait_swing_softness * s)
@@ -364,7 +414,7 @@ def main() -> int:
                 left_s = s
                 right_s = -s
                 # Swing/stance gating with double-support window.
-                ds = _clamp(args.gait_ds, 0.0, 0.4)
+                ds = _clamp(gait_ds_eff, 0.0, 0.4)
                 def swing_gate(val):
                     if val <= ds:
                         return 0.0
@@ -396,30 +446,40 @@ def main() -> int:
                 base_l_ankle = base_qpos("left_ankle_pitch_joint")
                 base_r_ankle = base_qpos("right_ankle_pitch_joint")
 
-                swing_scale = _clamp(args.gait_swing_scale, 0.0, 1.0)
+                swing_scale = _clamp(gait_swing_scale_eff, 0.0, 1.0)
                 if base_l_hip is not None:
                     set_joint("left_hip_pitch_joint", base_l_hip, args.hip_amp * swing_scale, left_s)
                 if base_r_hip is not None:
                     set_joint("right_hip_pitch_joint", base_r_hip, args.hip_amp * swing_scale, right_s)
                 # Add forward lean offset.
                 if base_l_hip is not None:
-                    set_joint("left_hip_pitch_joint", qpos_cmd[joints["left_hip_pitch_joint"][0]] + args.hip_offset, 0.0, 0.0)
+                    set_joint(
+                        "left_hip_pitch_joint",
+                        qpos_cmd[joints["left_hip_pitch_joint"][0]] + hip_offset_eff * gait_ramp,
+                        0.0,
+                        0.0,
+                    )
                 if base_r_hip is not None:
-                    set_joint("right_hip_pitch_joint", qpos_cmd[joints["right_hip_pitch_joint"][0]] + args.hip_offset, 0.0, 0.0)
+                    set_joint(
+                        "right_hip_pitch_joint",
+                        qpos_cmd[joints["right_hip_pitch_joint"][0]] + hip_offset_eff * gait_ramp,
+                        0.0,
+                        0.0,
+                    )
 
                 # Knees: flex more during swing, extend slightly during stance.
                 if base_l_knee is not None:
-                    knee_l = base_l_knee + args.knee_amp * (-left_s) + args.swing_knee * left_swing + args.gait_stance_knee * left_stance
+                    knee_l = base_l_knee + args.knee_amp * (-left_s) + args.swing_knee * left_swing + gait_stance_knee_eff * left_stance
                     set_joint("left_knee_joint", knee_l, 0.0, 0.0)
                 if base_r_knee is not None:
-                    knee_r = base_r_knee + args.knee_amp * (-right_s) + args.swing_knee * right_swing + args.gait_stance_knee * right_stance
+                    knee_r = base_r_knee + args.knee_amp * (-right_s) + args.swing_knee * right_swing + gait_stance_knee_eff * right_stance
                     set_joint("right_knee_joint", knee_r, 0.0, 0.0)
                 # Ankles: dorsiflex during swing for toe clearance.
                 if base_l_ankle is not None:
-                    ankle_l = base_l_ankle + args.ankle_amp * left_s - args.swing_ankle * left_swing - args.gait_stance_ankle * left_stance
+                    ankle_l = base_l_ankle + args.ankle_amp * left_s - args.swing_ankle * left_swing - gait_stance_ankle_eff * left_stance
                     set_joint("left_ankle_pitch_joint", ankle_l, 0.0, 0.0)
                 if base_r_ankle is not None:
-                    ankle_r = base_r_ankle + args.ankle_amp * right_s - args.swing_ankle * right_swing - args.gait_stance_ankle * right_stance
+                    ankle_r = base_r_ankle + args.ankle_amp * right_s - args.swing_ankle * right_swing - gait_stance_ankle_eff * right_stance
                     set_joint("right_ankle_pitch_joint", ankle_r, 0.0, 0.0)
 
                 # Lateral gait: widen stance and counter lateral velocity.
@@ -460,18 +520,31 @@ def main() -> int:
                 roll_corr = (-args.stab_kp * roll - args.stab_kd * roll_rate) * ramp * stab_scale
                 if args.gait_walk:
                     # Track a forward pitch target during gait.
-                    pitch_err = pitch - (-args.gait_pitch_bias)
+                    pitch_err = pitch - (-(gait_pitch_bias_eff * gait_ramp))
                     pitch_corr = (-args.stab_kp * pitch_err - args.stab_kd * pitch_rate) * ramp * stab_scale
                 else:
                     pitch_corr = (-args.stab_kp * pitch - args.stab_kd * pitch_rate) * ramp * stab_scale
 
                 # Position stabilization: keep pelvis over mid-foot in XY
+                v_world = _body_linvel_world(data, pelvis_id)
+                v_fwd, v_lat = _rotate_world_to_body(yaw, v_world[:2])
+
+                if args.gait_walk:
+                    # Dampen forward/lateral velocity to reduce tipping.
+                    target_vx = float(args.forward_speed)
+                    pitch_corr += (-args.gait_vel_kp * (v_fwd - target_vx) - args.gait_vel_kd * v_fwd) * ramp
+                    roll_corr += (-args.gait_lat_kd * v_lat) * ramp
+                    # If leaning backward, add extra forward pitch correction.
+                    if pitch > args.back_pitch_thresh:
+                        pitch_corr += -args.back_pitch_kp * (pitch - args.back_pitch_thresh) * ramp
+
                 if left_foot_id >= 0 and right_foot_id >= 0:
                     midfoot = 0.5 * (data.xpos[left_foot_id] + data.xpos[right_foot_id])
                     err_xy = data.xpos[pelvis_id][:2] - midfoot[:2]
-                    v_world = _body_linvel_world(data, pelvis_id)
                     err_fwd, err_lat = _rotate_world_to_body(yaw, err_xy)
-                    v_fwd, v_lat = _rotate_world_to_body(yaw, v_world[:2])
+                    if args.gait_walk:
+                        # Bias COM forward over mid-foot to avoid backward falls.
+                        err_fwd -= gait_com_forward_eff * gait_ramp
                     pitch_xy = (-args.xy_kp * err_fwd - args.xy_kd * v_fwd) * ramp
                     roll_xy = (-args.xy_kp * err_lat - args.xy_kd * v_lat) * ramp
                     pitch_corr += _clamp(pitch_xy, -args.xy_max, args.xy_max)
@@ -493,11 +566,29 @@ def main() -> int:
                 apply_corr("left_ankle_pitch_joint", -ankle_w * pitch_corr)
                 apply_corr("right_ankle_pitch_joint", -ankle_w * pitch_corr)
 
+                if args.gait_walk and pitch > args.back_pitch_thresh:
+                    # Direct forward-lean bias to recover from backward tipping.
+                    excess = _clamp((pitch - args.back_pitch_thresh) / 0.2, 0.0, 1.0)
+                    ff = -args.back_pitch_ff * excess * ramp
+                    apply_corr("left_hip_pitch_joint", hip_w * ff)
+                    apply_corr("right_hip_pitch_joint", hip_w * ff)
+                    apply_corr("left_ankle_pitch_joint", -ankle_w * ff)
+                    apply_corr("right_ankle_pitch_joint", -ankle_w * ff)
+
                 # Roll stabilization: push hip/ankle roll
                 apply_corr("left_hip_roll_joint", hip_w * roll_corr)
                 apply_corr("right_hip_roll_joint", hip_w * roll_corr)
                 apply_corr("left_ankle_roll_joint", -ankle_w * roll_corr)
                 apply_corr("right_ankle_roll_joint", -ankle_w * roll_corr)
+
+                if args.gait_walk and abs(roll) > args.side_roll_thresh:
+                    # Direct roll bias to recover from side tipping.
+                    excess = _clamp((abs(roll) - args.side_roll_thresh) / 0.2, 0.0, 1.0)
+                    ff = -np.sign(roll) * args.side_roll_ff * excess * ramp
+                    apply_corr("left_hip_roll_joint", hip_w * ff)
+                    apply_corr("right_hip_roll_joint", hip_w * ff)
+                    apply_corr("left_ankle_roll_joint", -ankle_w * ff)
+                    apply_corr("right_ankle_roll_joint", -ankle_w * ff)
 
             for act_id, jnt_id, qadr, dadr in act_joint:
                 if jnt_id is None:

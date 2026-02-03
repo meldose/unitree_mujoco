@@ -7,3 +7,6 @@ WARNING: Nan, Inf or huge value in QACC at DOF 1. The simulation is unstable. Ti
 Tue Feb  3 16:38:14 2026
 WARNING: File size over 2GB is not supported. File: '/home/meldose/g1/unitree_mujoco/unitree_robots/g1'
 
+Tue Feb  3 21:54:58 2026
+WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Time = 3.9050.
+

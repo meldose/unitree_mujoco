@@ -110,12 +110,12 @@ pip3 install pygame
 ### 2. Test
 ```bash
 cd ./simulate_python
-python3 ./unitree_mujoco.py
+./unitree_mujoco.py
 ```
 You should see the mujoco simulator with the Go2 robot loaded.
 In a new terminal, run:
 ```bash
-python3 ./test/test_unitree_sdk2.py
+./test/test_unitree_sdk2.py
 ```
 The program will output the robot's pose and position information in the simulator, and each motor of the robot will continuously output 1Nm of torque.
 

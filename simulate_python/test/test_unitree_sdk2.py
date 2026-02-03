@@ -1,4 +1,10 @@
+#!/home/meldose/.pyenv/versions/unitree310/bin/python
 import time
+import sys
+from pathlib import Path
+
+# Ensure we import the local simulate_python/config.py
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
@@ -8,6 +14,7 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_
 from unitree_sdk2py.utils.crc import CRC
+import config
 
 
 def HighStateHandler(msg: SportModeState_):
@@ -21,7 +28,7 @@ def LowStateHandler(msg: LowState_):
 
 
 if __name__ == "__main__":
-    ChannelFactoryInitialize(1, "lo")
+    ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
     hight_state_suber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
     low_state_suber = ChannelSubscriber("rt/lowstate", LowState_)
 

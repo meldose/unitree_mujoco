@@ -1,3 +1,4 @@
+#!/home/meldose/.pyenv/versions/unitree310/bin/python
 import mujoco
 import numpy as np
 import pygame
@@ -12,6 +13,11 @@ from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__WirelessController_
 from unitree_sdk2py.utils.thread import RecurrentThread
 
+import sys
+from pathlib import Path
+
+# Ensure we import the local simulate_python/config.py
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 if config.ROBOT=="g1":
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
